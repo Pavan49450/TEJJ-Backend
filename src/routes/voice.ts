@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { transcribeAndTranslate } from '../services/voiceService';
-import { mapVoiceToSkill, mapVoiceToExperience, mapVoiceToPay } from '../utils';
+import { mapVoiceToSkill, mapVoiceToExperience, mapVoiceToPay, mapVoiceToCity } from '../utils';
 
 const router = Router();
 
@@ -24,6 +24,8 @@ router.post('/transcribe-translate', authMiddleware, async (req: AuthRequest, re
   if (exp !== null) structured.years_experience = exp;
   const pay = mapVoiceToPay(result.englishText);
   if (pay !== null) structured.min_pay_per_shift = pay;
+  const city = mapVoiceToCity(result.englishText);
+  if (city) structured.city = city;
 
   res.json({ success: true, data: { ...result, structured } });
 });

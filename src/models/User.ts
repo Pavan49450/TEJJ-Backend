@@ -12,6 +12,7 @@ export interface IUser extends Document {
   last_active?: Date;
   device_type?: string;
   app_version?: string;
+  refresh_tokens: string[];
   created_at: Date;
   updated_at: Date;
 }
@@ -28,6 +29,7 @@ const userSchema = new Schema<IUser>({
   last_active: Date,
   device_type: { type: String, enum: ['ANDROID', 'IOS', 'FEATURE_PHONE'] },
   app_version: String,
+  refresh_tokens: { type: [String], default: [] },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 export const User = model<IUser>('User', userSchema);

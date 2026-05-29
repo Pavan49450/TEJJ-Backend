@@ -21,7 +21,7 @@ export async function transcribeAndTranslate(text: string, sourceLanguage: strin
     };
   }
 
-  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     // No API key — return text as-is with best-effort keyword extraction
     return {

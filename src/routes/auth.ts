@@ -10,6 +10,10 @@ import { EMPLOYER_ESSENTIAL_FIELDS,  shapeEmployer,  shapeWorker,  UPDATABLE_FIE
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your_fallback_secret';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'your_refresh_fallback_secret';
+const ACCESS_TOKEN_TTL = '1h';
+const REFRESH_TOKEN_TTL = '30d';
+const MAX_REFRESH_TOKENS_PER_USER = 5;
 
 // POST /auth/otp/send — Trigger OTP via OTP Service
 router.post('/otp/send', async (req: Request, res: Response) => {
@@ -70,17 +74,29 @@ router.post('/otp/verify', async (req: Request, res: Response) => {
       });
     }
 
-    // Generate JWT
-    const token = jwt.sign(
+    const accessToken = jwt.sign(
       { userId: user._id, phone: user.phone_number, role: user.active_role },
       JWT_SECRET,
-      { expiresIn: '30d' }
+      { expiresIn: ACCESS_TOKEN_TTL }
     );
+
+    const refreshToken = jwt.sign(
+      { userId: user._id.toString(), type: 'refresh' },
+      JWT_REFRESH_SECRET,
+      { expiresIn: REFRESH_TOKEN_TTL }
+    );
+
+    // Store refresh token; keep at most MAX_REFRESH_TOKENS_PER_USER per user (multi-device)
+    const userDoc = await User.findById(user._id);
+    const existingTokens = userDoc?.refresh_tokens ?? [];
+    const trimmed = existingTokens.slice(-(MAX_REFRESH_TOKENS_PER_USER - 1));
+    await User.updateOne({ _id: user._id }, { $set: { refresh_tokens: [...trimmed, refreshToken] } });
 
     res.json({
       success: true,
       data: {
-        token,
+        token: accessToken,
+        refresh_token: refreshToken,
         user_id: user._id,
         is_new: !user.created_at || (Date.now() - user.created_at.getTime() < 5000)
       }
@@ -190,6 +206,49 @@ router.patch('/update-user', authMiddleware, async (req: AuthRequest, res: Respo
     console.error(err);
     res.status(500).json({ success: false, error: 'Failed to update user' });
   }
+});
+
+// POST /auth/refresh — exchange a valid refresh token for a new access token
+router.post('/refresh', async (req: Request, res: Response) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) {
+    res.status(400).json({ success: false, error: 'refresh_token required' });
+    return;
+  }
+
+  try {
+    const decoded = jwt.verify(refresh_token, JWT_REFRESH_SECRET) as { userId: string; type: string };
+    if (decoded.type !== 'refresh') {
+      res.status(401).json({ success: false, error: 'Invalid refresh token' });
+      return;
+    }
+
+    // Confirm token is still in DB (not revoked via logout)
+    const user = await User.findOne({ _id: decoded.userId, refresh_tokens: refresh_token });
+    if (!user) {
+      res.status(401).json({ success: false, error: 'Refresh token revoked' });
+      return;
+    }
+
+    const accessToken = jwt.sign(
+      { userId: user._id, phone: user.phone_number, role: user.active_role },
+      JWT_SECRET,
+      { expiresIn: ACCESS_TOKEN_TTL }
+    );
+
+    res.json({ success: true, data: { token: accessToken } });
+  } catch (err) {
+    res.status(401).json({ success: false, error: 'Invalid or expired refresh token' });
+  }
+});
+
+// POST /auth/logout — revoke refresh token
+router.post('/logout', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const { refresh_token } = req.body;
+  if (refresh_token) {
+    await User.updateOne({ _id: req.user!.userId }, { $pull: { refresh_tokens: refresh_token } });
+  }
+  res.json({ success: true });
 });
 
 export default router;

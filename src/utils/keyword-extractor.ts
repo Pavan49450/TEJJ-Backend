@@ -1,4 +1,4 @@
-import { SKILL_LIST, CUISINE_LIST } from './constants';
+import { SKILL_LIST, CUISINE_LIST, INDIAN_CITIES } from './constants';
 
 export function extractKeywords(englishText: string): string[] {
   const lower = englishText.toLowerCase();
@@ -63,19 +63,29 @@ export function mapVoiceToExperience(englishText: string): number | null {
 
   for (const [word, num] of Object.entries(hindiNumbers)) {
     if (lower.includes(word + ' saal') || lower.includes(word + ' year') || lower.includes(word + ' sal')) {
-      return Math.min(num, 6);
+      return Math.min(num, 20);
     }
   }
 
   const digitMatch = lower.match(/(\d+)\s*(saal|year|sal|yr)/);
   if (digitMatch) {
-    return Math.min(parseInt(digitMatch[1], 10), 6);
+    return Math.min(parseInt(digitMatch[1], 10), 20);
   }
 
   if (lower.includes('fresher') || lower.includes('naya') || lower.includes('beginner')) {
     return 0;
   }
 
+  return null;
+}
+
+export function mapVoiceToCity(englishText: string): string | null {
+  const lower = englishText.toLowerCase();
+  for (const city of INDIAN_CITIES) {
+    if (lower.includes(city.toLowerCase())) {
+      return city;
+    }
+  }
   return null;
 }
 
