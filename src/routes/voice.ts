@@ -1,6 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { transcribeAndTranslate } from '../services/voiceService';
+import { transcribeAndTranslate, matchVoiceToStep } from '../services/voiceService';
 import { mapVoiceToSkill, mapVoiceToExperience, mapVoiceToPay, mapVoiceToCity } from '../utils';
 
 const router = Router();
@@ -16,7 +16,6 @@ router.post('/transcribe-translate', authMiddleware, async (req: AuthRequest, re
 
   const result = await transcribeAndTranslate(text, sourceLanguage);
 
-  // Enhance with structured field mappings
   const structured: Record<string, unknown> = {};
   const skill = mapVoiceToSkill(result.englishText);
   if (skill) structured.primary_skill = skill;
@@ -28,6 +27,25 @@ router.post('/transcribe-translate', authMiddleware, async (req: AuthRequest, re
   if (city) structured.city = city;
 
   res.json({ success: true, data: { ...result, structured } });
+});
+
+// POST /voice/match-step
+// Receives translated speech + step context, returns ranked option suggestions
+router.post('/match-step', authMiddleware, async (req: AuthRequest, res: Response) => {
+  const { originalText, translatedText, stepType, options } = req.body;
+
+  if (!originalText?.trim() && !translatedText?.trim()) {
+    res.status(400).json({ success: false, error: 'originalText or translatedText is required' });
+    return;
+  }
+
+  if (!stepType) {
+    res.status(400).json({ success: false, error: 'stepType is required' });
+    return;
+  }
+
+  const data = matchVoiceToStep({ originalText: originalText ?? '', translatedText: translatedText ?? '', stepType, options });
+  res.json({ success: true, data });
 });
 
 export default router;
