@@ -58,6 +58,17 @@ app.use('/uploads', express.static(path.resolve(UPLOAD_LOCAL_PATH)));
 // Health check
 app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
+// Ensure DB is connected before any route handler runs (required for Vercel serverless cold starts)
+app.use(async (_req, res, next) => {
+  try {
+    await connectDatabase();
+    next();
+  } catch (err) {
+    console.error('DB connection failed:', err);
+    res.status(503).json({ success: false, error: 'Database unavailable' });
+  }
+});
+
 // API routes
 app.use('/auth', authRoutes);
 app.use('/workers', workerRoutes);
