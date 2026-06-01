@@ -38,7 +38,7 @@ export async function transcribeAndTranslate(text: string, sourceLanguage: strin
       source: sourceLanguage !== 'auto' ? sourceLanguage : undefined,
       target: 'en',
       format: 'text',
-    });
+    }, { family: 4 });
 
     const translation = response.data?.data?.translations?.[0];
     const englishText = translation?.translatedText ?? text;
