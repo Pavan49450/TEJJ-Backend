@@ -8,6 +8,7 @@ type WorkerAIScoreInput = {
 };
 
 type WorkerOnboardingInput = {
+  sector?: unknown;
   primary_skill?: unknown;
   sub_skills?: unknown;
   years_experience?: unknown;
@@ -202,6 +203,7 @@ export function normalizeWorkerOnboardingPayload(input: WorkerOnboardingInput) {
   validateDayValues(availableDays, 'available_days', details);
   validateShiftValues(preferredShifts, 'preferred_shifts', details);
 
+  const sector = optionalString(input.sector, 'sector', details);
   const secondarySkills = ensureStringArray(input.sub_skills ?? [], 'sub_skills', details);
   const profilePhotoUrl = optionalUrl(input.profile_photo_url, 'profile_photo_url', details);
   const skillVideoUrl = optionalUrl(input.skill_video_url, 'skill_video_url', details);
@@ -212,6 +214,7 @@ export function normalizeWorkerOnboardingPayload(input: WorkerOnboardingInput) {
   assertNoValidationErrors(details, 'Invalid worker onboarding payload');
 
   return {
+    sector,
     primary_skill: primarySkill,
     secondary_skills: secondarySkills,
     years_experience: yearsExperience,

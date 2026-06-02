@@ -13,6 +13,7 @@ export interface IWorker extends Document {
   date_of_birth?: Date;
   state_of_origin?: string;
   aadhaar_verified: boolean;
+  sector?: string;
   primary_skill?: string;
   secondary_skills: string[];
   cuisine_specialities: string[];
@@ -105,6 +106,7 @@ const workerSchema = new Schema<IWorker>({
   date_of_birth: Date,
   state_of_origin: String,
   aadhaar_verified: { type: Boolean, default: false },
+  sector: String,
   primary_skill: String,
   secondary_skills: [String],
   cuisine_specialities: [String],
