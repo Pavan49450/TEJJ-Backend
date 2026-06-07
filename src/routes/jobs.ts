@@ -25,7 +25,7 @@ function haversineKm(coords1: [number, number], coords2: [number, number]): numb
 // GET /jobs/feed — Worker job feed
 router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    // 1. Fetch Worker (Use .lean() for faster reads since we don't need Mongoose documents)
+    // 1. Fetch Worker and applied job IDs concurrently
     const worker = await Worker.findOne({ user_id: req.user!.userId }).lean();
     if (!worker) {
       res.status(404).json({ success: false, error: 'Worker profile not found' });
@@ -35,7 +35,7 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
     // 2. Sanitize and Extract Query Params
     const { lane, min_pay, page = 1, limit = 20, skill, lat, lng } = req.query;
     const pageNum = Math.max(1, Number(page));
-    const limitNum = Math.min(50, Math.max(1, Number(limit))); // Cap limit to prevent server overload
+    const limitNum = Math.min(50, Math.max(1, Number(limit)));
 
     const overrideLat = lat !== undefined ? Number(lat) : undefined;
     const overrideLng = lng !== undefined ? Number(lng) : undefined;
@@ -48,11 +48,21 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
       ? Number(req.query.max_distance_km)
       : (worker.preferred_radius_km || 15)) * 1000;
 
-    // 3. Construct Query Conditions
+    // 3. Fetch applied job IDs — only job_id field, indexed query
+    const appliedDocs = await Application.find({ worker_id: worker._id })
+      .select('job_id')
+      .lean();
+    const appliedJobIds = appliedDocs.map(a => a.job_id);
+
+    // 4. Construct Query Conditions
     const now = new Date();
     const andConditions: FilterQuery<typeof Job>[] = [
       { $or: [{ expires_at: { $exists: false } }, { expires_at: { $gt: now } }] },
     ];
+
+    if (appliedJobIds.length > 0) {
+      andConditions.push({ _id: { $nin: appliedJobIds } });
+    }
 
     const effectiveMinPay = Math.max(
       min_pay ? Number(min_pay) : 0,
@@ -83,26 +93,24 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     if (lane) query.lane = Number(lane);
 
-    console.log((JSON.stringify(query)));
-
-    // 4. Fetch Jobs
+    // 5. Fetch limit+1 to determine has_more without a separate count query
     const jobs = await Job.find(query)
       .skip((pageNum - 1) * limitNum)
-      .limit(limitNum)
+      .limit(limitNum + 1)
       .lean();
 
-    console.log(jobs);
+    const has_more = jobs.length > limitNum;
+    const pageJobs = has_more ? jobs.slice(0, limitNum) : jobs;
 
-    if (jobs.length === 0) {
-      res.json({ success: true, data: [] });
+    if (pageJobs.length === 0) {
+      res.json({ success: true, data: [], page: pageNum, has_more: false });
       return;
     }
 
-    // 5. Parallel Data Fetching (Employers & Market Rates)
-    const employerIds = [...new Set(jobs.map(j => j.employer_id.toString()))];
-    const uniqueSkills = [...new Set(jobs.map(j => j.primary_skill))];
+    // 6. Parallel Data Fetching (Employers & Market Rates)
+    const employerIds = [...new Set(pageJobs.map(j => j.employer_id.toString()))];
+    const uniqueSkills = [...new Set(pageJobs.map(j => j.primary_skill))];
 
-    // Fetch both datasets concurrently rather than sequentially
     const [employers, marketRates] = await Promise.all([
       Employer.find({ _id: { $in: employerIds } })
         .select('property_type area_locality dignity_score gstin_verified')
@@ -113,19 +121,16 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
     const employerMap = new Map(employers.map(e => [e._id.toString(), e]));
     const marketRateMap = new Map(marketRates.map(r => [`${r.city}:${r.skill}`, r.median]));
 
-    // 6. Map Feed Responses
-    const feedPromises = jobs.map(async (job) => {
+    // 7. Map Feed Responses — run all SUPS concurrently
+    const feedPromises = pageJobs.map(async (job) => {
       const employer = employerMap.get(job.employer_id.toString());
       if (!employer) return null;
-
-      // ⚠️ Note: Filtering here reduces the output size below the requested 'limit'
       if (employer.dignity_score < worker.min_dignity_score) return null;
 
       const distance_km = workerCoords && job.location?.coordinates
         ? haversineKm(workerCoords as [number, number], job.location.coordinates)
         : undefined;
 
-      // ⚠️ Note: N+1 query vulnerability if computeSUPS makes DB calls
       const sups_score = await computeSUPS(worker._id.toString(), job._id.toString());
 
       const marketMedian = marketRateMap.get(`${worker.city}:${job.primary_skill}`);
@@ -145,6 +150,10 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
         openings_filled: job.openings_filled,
         lane: job.lane,
         expires_at: job.expires_at,
+        location: job.location,
+        pay_type: job.pay_type,
+        pay_min: job.pay_min,
+        pay_max: job.pay_max,
         distance_km,
         sups_score,
         market_rate_delta,
@@ -157,7 +166,7 @@ router.get('/feed', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const feed = (await Promise.all(feedPromises)).filter(Boolean);
 
-    res.json({ success: true, data: feed });
+    res.json({ success: true, data: feed, page: pageNum, has_more });
   } catch (err) {
     console.error('Feed error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch job feed' });
@@ -232,10 +241,12 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  const worker = await Worker.findOne({ user_id: req.user!.userId }).lean();
-  const employer = await Employer.findById(job.employer_id)
-    .select('-location_address -contact_name -contact_phone -entry_instructions -gstin')
-    .lean();
+  const [worker, employer] = await Promise.all([
+    Worker.findOne({ user_id: req.user!.userId }).select('last_known_location home_location').lean(),
+    Employer.findById(job.employer_id)
+      .select('-location_address -contact_name -contact_phone -entry_instructions -gstin')
+      .lean(),
+  ]);
 
   const workerCoords = (worker?.last_known_location || worker?.home_location)?.coordinates;
   const jobCoords = job.location?.coordinates;
@@ -243,29 +254,93 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
     ? haversineKm(workerCoords as [number, number], jobCoords)
     : null;
 
+  // Check if this worker already applied — only fetch needed fields
+  const existingApplication = worker
+    ? await Application.findOne({ job_id: job._id, worker_id: (worker as any)._id })
+      .select('_id status')
+      .lean()
+    : null;
+
   res.json({
     success: true,
     data: {
+      // Core
       _id: job._id,
       lane: job.lane,
+      status: job.status,
+      is_demo_post: job.is_demo_post,
       job_title: job.job_title,
       primary_skill: job.primary_skill,
+      secondary_skills_preferred: job.secondary_skills_preferred ?? [],
+      cuisine_preferred: job.cuisine_preferred ?? [],
       description: job.job_description ?? '',
-      pay_rate: job.pay_rate,
+      special_instructions: job.special_instructions ?? '',
+      // Pay
+      pay_rate: job.pay_rate ?? null,
       pay_type: job.pay_type,
-      shift_start_time: job.shift_start_time,
-      shift_duration_hours: job.shift_duration_hours,
+      pay_min: job.pay_min ?? null,
+      pay_max: job.pay_max ?? null,
+      pay_vs_market: job.pay_vs_market ?? null,
+      // Shift (L1/L2)
+      shift_start_time: job.shift_start_time ?? null,
+      shift_end_time: job.shift_end_time ?? null,
+      shift_duration_hours: job.shift_duration_hours ?? null,
+      // Openings
       number_of_openings: job.number_of_openings,
       openings_filled: job.openings_filled,
+      // Requirements
+      experience_years_min: job.experience_years_min ?? null,
+      minimum_qualification: job.minimum_qualification ?? '',
+      // Contract (L3/L4)
+      contract_start_date: job.contract_start_date ?? null,
+      contract_duration: job.contract_duration ?? '',
+      notice_period_max_days: job.notice_period_max_days ?? null,
+      // Interview (L4)
+      interview_required: job.interview_required ?? false,
+      interview_format: job.interview_format ?? null,
+      // Lifecycle
+      expires_at: job.expires_at ?? null,
+      boost_active: job.boost_active ?? false,
+      cream_pool_first: job.cream_pool_first ?? false,
+      // Location
       distance_km,
-      employer_id: employer?._id ?? job.employer_id,
-      employer_property_type: employer?.property_type ?? '',
-      employer_area_locality: employer?.area_locality ?? '',
-      employer_dignity_score: employer?.dignity_score ?? 0,
-      employer_gstin_verified: employer?.gstin_verified ?? false,
+      // Perks
       meals_provided: job.meals_provided ?? false,
-      uniform_provided: Boolean(job.uniform_required),
+      accommodation_provided: job.accommodation_provided ?? false,
       transport_provided: job.transport_provided ?? false,
+      uniform_provided: Boolean(job.uniform_required),
+      uniform_details: job.uniform_required ?? '',
+      // Employer
+      employer_id: employer?._id ?? job.employer_id,
+      employer_property_name: employer?.property_name ?? '',
+      employer_property_type: employer?.property_type ?? '',
+      employer_property_segment: employer?.property_segment ?? '',
+      employer_area_locality: employer?.area_locality ?? '',
+      employer_city: employer?.city ?? '',
+      employer_location_landmark: employer?.location_landmark ?? '',
+      employer_nearest_metro: employer?.nearest_metro_or_bus ?? '',
+      employer_parking_available: employer?.parking_available ?? false,
+      employer_cuisine_types: employer?.cuisine_types ?? [],
+      employer_covers_capacity: employer?.covers_capacity ?? null,
+      employer_number_of_rooms: employer?.number_of_rooms ?? null,
+      employer_brand_affiliation: employer?.brand_affiliation ?? '',
+      employer_year_established: employer?.year_established ?? null,
+      employer_dignity_score: employer?.dignity_score ?? 0,
+      employer_dignity_state: employer?.dignity_state ?? 'NEW',
+      employer_gstin_verified: employer?.gstin_verified ?? false,
+      employer_fssai_verified: employer?.fssai_verified ?? false,
+      employer_liquor_license: employer?.liquor_license ?? false,
+      employer_psara_registered: employer?.psara_registered ?? false,
+      employer_verified_badge: employer?.verified_employer_badge ?? false,
+      employer_confirmation_rate: employer?.confirmation_rate ?? null,
+      employer_pay_accuracy_rate: employer?.pay_accuracy_rate ?? null,
+      employer_fair_treatment_rate: employer?.fair_treatment_rate ?? null,
+      employer_worker_return_rate: employer?.worker_return_rate ?? null,
+      employer_total_confirmed_arrivals: employer?.total_confirmed_arrivals ?? 0,
+      // Application state
+      has_applied: !!existingApplication,
+      application_id: existingApplication?._id ?? null,
+      application_status: existingApplication?.status ?? null,
     },
   });
 });

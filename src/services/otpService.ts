@@ -16,6 +16,7 @@ export class DevOTPProvider implements OTPProvider {
     '+919999999908': '000000',
     '+918888897687': '000000',
     '+918888884607': '000000',
+    '+918888887204': '000000',
   };
 
   constructor(private baseProvider: OTPProvider) { }

@@ -7,7 +7,7 @@ export function startExpireJobsCron() {
     try {
       const result = await Job.updateMany(
         {
-          status: { $in: ['ACTIVE', 'BROADCASTING'] },
+          status: { $in: ['ACTIVE', 'BROADCASTING', 'PARTIALLY_FILLED'] },
           expires_at: { $lt: new Date() },
         },
         { $set: { status: 'EXPIRED' } }
